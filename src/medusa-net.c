@@ -698,11 +698,11 @@ int medusaDisconnect(int hSocket)
   pthread_mutex_unlock(&ptmSSLMutex);
 
   writeError(ERR_DEBUG, "Disconnect successful");
-  return -1;
+  return SUCCESS;
 #else
   close(hSocket);
   writeError(ERR_DEBUG, "Disconnect successful");
-  return -1;
+  return SUCCESS;
 #endif
 }
 
@@ -802,7 +802,7 @@ int medusaReceiveRegex(int hSocket, unsigned char **szBufReceive, int* nBufRecei
   int nAttempt = 1;
   const int BUFFER_SIZE = 1500;
     
-  writeError(ERR_DEBUG, "Regural expession: \"%s\"", regex);
+  writeError(ERR_DEBUG, "Regular expession: \"%s\"", regex);
   errcode = regcomp(&preg, regex, REG_EXTENDED|REG_ICASE|REG_NOSUB);
   if (errcode)
   {

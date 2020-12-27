@@ -31,6 +31,10 @@
  *                                                                         *
  ***************************************************************************/
 
+
+#define _GNU_SOURCE
+#include <string.h>
+
 #include "module.h"
 
 #define	MODULE_NAME		"http.mod"
@@ -75,8 +79,10 @@ enum HTTP_STATE
 };
 
 // Forward declarations
-int getAuthType(int hSocket, _MODULE_DATA* _psSessionData);
-int tryLogin(int hSocket, _MODULE_DATA* _psSessionData, sLogin** login, char* szLogin, char* szPassword);
+//int getAuthType(int hSocket, _MODULE_DATA* _psSessionData);
+int getAuthType(sConnectParams *params, _MODULE_DATA* _psSessionData, sLogin* _psLogin);
+//int tryLogin(int hSocket, _MODULE_DATA* _psSessionData, sLogin** login, char* szLogin, char* szPassword);
+int tryLogin(sConnectParams *params, _MODULE_DATA* _psSessionData, sLogin** login, unsigned char* szLogin, unsigned char* szPassword);
 int initModule(_MODULE_DATA* _psSessionData, sLogin* login);
 
 // Tell medusa how many parameters this module allows
@@ -94,7 +100,7 @@ void summaryUsage(char **ppszSummary)
   if (*ppszSummary == NULL)
   {
     iLength = strlen(MODULE_SUMMARY_USAGE) + strlen(MODULE_VERSION) + strlen(MODULE_SUMMARY_FORMAT) + 1;
-    *ppszSummary = (char*)malloc(iLength);
+    *ppszSummary = (unsigned char*)malloc(iLength);
     memset(*ppszSummary, 0, iLength);
     snprintf(*ppszSummary, iLength, MODULE_SUMMARY_FORMAT, MODULE_SUMMARY_USAGE, MODULE_VERSION);
   }
@@ -226,7 +232,7 @@ int go(sLogin* logins, int argc, char *argv[])
         {
           psSessionData->szDomain = malloc(strlen(pOpt) + 1);
           memset(psSessionData->szDomain, 0, strlen(pOpt) + 1);
-          strncpy((char *) psSessionData->szDomain, pOpt, strlen(pOpt));
+          strncpy((unsigned char *) psSessionData->szDomain, pOpt, strlen(pOpt));
         }
         else
           writeError(ERR_WARNING, "Method DOMAIN requires value to be set.");
@@ -250,9 +256,53 @@ int go(sLogin* logins, int argc, char *argv[])
   return SUCCESS;
 }
 
+
+int httpSendRecv( sConnectParams *params, _MODULE_DATA *_psSessionData, sLogin* _psLogin, unsigned char* bufSend, int nSendBufferSize, unsigned char** bufReceive, int *nReceiveBufferSize, const unsigned char *recvRegex ){
+
+  int hSocket = -1;
+
+  if (_psLogin->psServer->psHost->iUseSSL > 0)
+    hSocket = medusaConnectSSL(params);
+  else
+    hSocket = medusaConnect(params);
+
+
+  if (hSocket < 0)
+  {
+    writeError(ERR_NOTICE, "%s: failed to connect, port %d was not open on %s", MODULE_NAME, params->nPort, _psLogin->psServer->pHostIP);
+    _psLogin->iResult = LOGIN_RESULT_UNKNOWN;
+    return FAILURE;
+  }
+
+
+  if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
+  {
+    writeError(ERR_ERROR, "%s failed: medusaSend was not successful", MODULE_NAME);
+    FREE(bufSend);
+    return FAILURE;
+  }
+
+  FREE(bufSend);
+
+
+  writeError(ERR_DEBUG_MODULE, "[%s] Retrieving server response.", MODULE_NAME);
+   /* --- Retrieve data from server --- */
+  if ((medusaReceiveRegex(hSocket, bufReceive, nReceiveBufferSize, recvRegex) == FAILURE) || (*bufReceive == NULL))
+  {
+    writeError(ERR_ERROR, "[%s] Failed: Unexpected or no data received: %s", MODULE_NAME, *bufReceive);
+    return FAILURE;
+  }
+
+  if (hSocket > 0)
+    medusaDisconnect(hSocket);
+
+  return SUCCESS;
+
+}
+
 int initModule(_MODULE_DATA *_psSessionData, sLogin* _psLogin)
 {
-  int hSocket = -1;
+  //int hSocket = -1;
   enum HTTP_STATE nState = MSTATE_NEW;
   int nBufLength = 0;
   sCredentialSet *psCredSet = NULL;
@@ -318,25 +368,25 @@ int initModule(_MODULE_DATA *_psSessionData, sLogin* _psLogin)
     {
     case MSTATE_NEW:
       // Already have an open socket - close it
-      if (hSocket > 0)
-        medusaDisconnect(hSocket);
+      // if (hSocket > 0)
+      //   medusaDisconnect(hSocket);
 
-      if (_psLogin->psServer->psHost->iUseSSL > 0)
-        hSocket = medusaConnectSSL(&params);
-      else
-        hSocket = medusaConnect(&params);
+      // if (_psLogin->psServer->psHost->iUseSSL > 0)
+      //   hSocket = medusaConnectSSL(&params);
+      // else
+      //   hSocket = medusaConnect(&params);
 
-      if (hSocket < 0)
-      {
-        writeError(ERR_NOTICE, "%s: failed to connect, port %d was not open on %s", MODULE_NAME, params.nPort, _psLogin->psServer->pHostIP);
-        _psLogin->iResult = LOGIN_RESULT_UNKNOWN;
-        return FAILURE;
-      }
+      // if (hSocket < 0)
+      // {
+      //   writeError(ERR_NOTICE, "%s: failed to connect, port %d was not open on %s", MODULE_NAME, params.nPort, _psLogin->psServer->pHostIP);
+      //   _psLogin->iResult = LOGIN_RESULT_UNKNOWN;
+      //   return FAILURE;
+      // }
 
       /* Get required authorization method */
       if (_psSessionData->nAuthType == AUTH_UNKNOWN)
       {
-        if ((getAuthType(hSocket, _psSessionData) == FAILURE) || (_psSessionData->nAuthType == AUTH_UNKNOWN))
+        if ((getAuthType(&params, _psSessionData, _psLogin) == FAILURE) || (_psSessionData->nAuthType == AUTH_UNKNOWN))
         {
           _psLogin->iResult = LOGIN_RESULT_UNKNOWN;
           return FAILURE;
@@ -349,7 +399,7 @@ int initModule(_MODULE_DATA *_psSessionData, sLogin* _psLogin)
 
       break;
     case MSTATE_RUNNING:
-      nState = tryLogin(hSocket, _psSessionData, &_psLogin, psCredSet->psUser->pUser, psCredSet->pPass);
+      nState = tryLogin(&params, _psSessionData, &_psLogin, psCredSet->psUser->pUser, psCredSet->pPass);
 
       if (_psLogin->iResult != LOGIN_RESULT_UNKNOWN)
       {
@@ -377,9 +427,9 @@ int initModule(_MODULE_DATA *_psSessionData, sLogin* _psLogin)
 
       break;
     case MSTATE_EXITING:
-      if (hSocket > 0)
-        medusaDisconnect(hSocket);
-      hSocket = -1;
+      // if (hSocket > 0)
+      //   medusaDisconnect(hSocket);
+      // hSocket = -1;
       nState = MSTATE_COMPLETE;
       break;
     default:
@@ -396,7 +446,7 @@ int initModule(_MODULE_DATA *_psSessionData, sLogin* _psLogin)
 
 /* Module Specific Functions */
 
-int getAuthType(int hSocket, _MODULE_DATA* _psSessionData)
+int getAuthType(sConnectParams *params, _MODULE_DATA* _psSessionData, sLogin* _psLogin)
 {
   unsigned char* bufSend = NULL;
   unsigned char* bufReceive = NULL;
@@ -413,20 +463,29 @@ int getAuthType(int hSocket, _MODULE_DATA* _psSessionData)
           _psSessionData->szDir, _psSessionData->szHostHeader, _psSessionData->szUserAgent, _psSessionData->szCustomHeader);
 
   writeError(ERR_DEBUG_MODULE, "[%s] Sending initial non-authentication request: %s", MODULE_NAME, bufSend);
-  if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
+  
+
+  if (httpSendRecv(params, _psSessionData, _psLogin, bufSend, nSendBufferSize, &bufReceive, &nReceiveBufferSize, "HTTP/1.* .*\r\n") < 0)
   {
-    writeError(ERR_ERROR, "%s failed: medusaSend was not successful", MODULE_NAME);
-    FREE(bufSend);
+    writeError(ERR_ERROR, "%s failed: httpSendRecv was not successful", MODULE_NAME);
+    //FREE(bufSend);
     return FAILURE;
   }
 
-  FREE(bufSend);
+  // if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
+  // {
+  //   writeError(ERR_ERROR, "%s failed: medusaSend was not successful", MODULE_NAME);
+  //   FREE(bufSend);
+  //   return FAILURE;
+  // }
 
-  if ((medusaReceiveRegex(hSocket, &bufReceive, &nReceiveBufferSize, "HTTP/1.* .*\r\n") == FAILURE) || (bufReceive == NULL))
-  {
-    writeError(ERR_ERROR, "[%s] Failed: Unexpected or no data received: %s", MODULE_NAME, bufReceive);
-    return FAILURE;
-  }
+  // FREE(bufSend);
+
+  // if ((medusaReceiveRegex(hSocket, &bufReceive, &nReceiveBufferSize, "HTTP/1.* .*\r\n") == FAILURE) || (bufReceive == NULL))
+  // {
+  //   writeError(ERR_ERROR, "[%s] Failed: Unexpected or no data received: %s", MODULE_NAME, bufReceive);
+  //   return FAILURE;
+  // }
 
   writeError(ERR_DEBUG_MODULE, "[%s] Parsing authentication header: %s", MODULE_NAME, bufReceive);
   if ((strcasestr((char*)bufReceive, "WWW-Authenticate: Basic")) || (strcasestr((char*)bufReceive, "WWW-Authenticate:Basic")))
@@ -459,11 +518,11 @@ int getAuthType(int hSocket, _MODULE_DATA* _psSessionData)
   return(SUCCESS);
 }
 
-int sendAuthBasic(int hSocket, _MODULE_DATA* _psSessionData, char* szLogin, char* szPassword)
+int sendAuthBasic(sConnectParams *params, _MODULE_DATA* _psSessionData, sLogin* _psLogin, unsigned char* szLogin, unsigned char* szPassword, unsigned char** bufReceive, int *nReceiveBufferSize)
 {
   unsigned char* bufSend = NULL;
-  char* szEncodedAuth = NULL;
-  char* szLoginDomain = NULL;
+  unsigned char* szEncodedAuth = NULL;
+  unsigned char* szLoginDomain = NULL;
   int nSendBufferSize = 0;
   int nRet = SUCCESS;
 
@@ -491,31 +550,40 @@ int sendAuthBasic(int hSocket, _MODULE_DATA* _psSessionData, char* szLogin, char
   bufSend = malloc(nSendBufferSize + 1);
   memset(bufSend, 0, nSendBufferSize + 1);
 
-  sprintf((char*)bufSend, "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAuthorization: Basic %s\r\n%s\r\n", 
+  sprintf((unsigned char*)bufSend, "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAuthorization: Basic %s\r\n%s\r\n", 
           _psSessionData->szDir, _psSessionData->szHostHeader, _psSessionData->szUserAgent, szEncodedAuth, _psSessionData->szCustomHeader);
 
-  if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
+
+  if (httpSendRecv(params, _psSessionData, _psLogin, bufSend, nSendBufferSize, bufReceive, nReceiveBufferSize, "HTTP/1.* [0-9]{3,3} .*\r\n") < 0)
   {
-    writeError(ERR_ERROR, "%s failed: medusaSend was not successful", MODULE_NAME);
-    nRet = FAILURE;  
+    writeError(ERR_ERROR, "%s failed: httpSendRecv was not successful", MODULE_NAME);
+    //FREE(bufSend);
+    return FAILURE;
   }
 
-  FREE(szEncodedAuth);
-  FREE(bufSend);
+  // if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
+  // {
+  //   writeError(ERR_ERROR, "%s failed: medusaSend was not successful", MODULE_NAME);
+  //   nRet = FAILURE;  
+  // }
+
+  if( szEncodedAuth != NULL)
+    FREE(szEncodedAuth);
+  //FREE(bufSend);
   return nRet;
 }
 
-int sendAuthNTLM(int hSocket, _MODULE_DATA* _psSessionData, char* szLogin, char* szPassword)
+int sendAuthNTLM(sConnectParams *params, _MODULE_DATA* _psSessionData, sLogin* _psLogin, char* szLogin, char* szPassword, unsigned char** bufReceive, int *nReceiveBufferSize)
 {
   unsigned char* bufSend = NULL;
-  unsigned char* bufReceive = NULL;
-  int nReceiveBufferSize = 0;
+  unsigned char* tmpBufReceive = NULL;
+  int nTmpReceiveBufferSize = 0;
   int nSendBufferSize = 0;
   tSmbNtlmAuthRequest   sTmpReq;
   tSmbNtlmAuthChallenge sTmpChall;
   tSmbNtlmAuthResponse  sTmpResp;
-  char *szTmpBuf = NULL;
-  char *szTmpBuf64 = NULL;
+  unsigned char *szTmpBuf = NULL;
+  unsigned char *szTmpBuf64 = NULL;
 
   /* --- Send Type-1 NTLM request --- */
 
@@ -526,7 +594,7 @@ int sendAuthNTLM(int hSocket, _MODULE_DATA* _psSessionData, char* szLogin, char*
   szTmpBuf64 = malloc(2 * SmbLength(&sTmpReq) + 2);
   memset(szTmpBuf64, 0, 2 * SmbLength(&sTmpReq) + 2);
 
-  base64_encode((char *)&sTmpReq, SmbLength(&sTmpReq), szTmpBuf64);
+  base64_encode((unsigned char *)&sTmpReq, SmbLength(&sTmpReq), szTmpBuf64);
   writeError(ERR_DEBUG_MODULE, "[%s] Sending initial challenge (B64 Encoded): %s", MODULE_NAME, szTmpBuf64);
 
   nSendBufferSize = 5 + strlen(_psSessionData->szDir) + 17 + strlen(_psSessionData->szHostHeader) +
@@ -536,51 +604,76 @@ int sendAuthNTLM(int hSocket, _MODULE_DATA* _psSessionData, char* szLogin, char*
   bufSend = malloc(nSendBufferSize + 1);
   memset(bufSend, 0, nSendBufferSize + 1);
 
-  sprintf((char*)bufSend, "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAuthorization: NTLM %s\r\nConnection: keep-alive\r\n%s\r\n", 
+  sprintf((unsigned char*)bufSend, "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAuthorization: NTLM %s\r\nConnection: keep-alive\r\n%s\r\n", 
           _psSessionData->szDir, _psSessionData->szHostHeader, _psSessionData->szUserAgent, szTmpBuf64, _psSessionData->szCustomHeader);
 
-  if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
-  {
-    writeError(ERR_ERROR, "%s failed: medusaSend was not successful", MODULE_NAME);
-    return FAILURE;
+  //Free memory
+  if( szTmpBuf64 != NULL){
+    FREE(szTmpBuf64);
+    szTmpBuf64 = NULL;
   }
 
-  FREE(szTmpBuf64);
-  FREE(bufSend);
-
-  /* --- Retrieve NTLM challenge from server --- */
-  if ((medusaReceiveRegex(hSocket, &bufReceive, &nReceiveBufferSize, "HTTP/1.* .*WWW-Authenticate.*\r\n") == FAILURE) || (bufReceive == NULL))
+  if (httpSendRecv(params, _psSessionData, _psLogin, bufSend, nSendBufferSize, &tmpBufReceive, &nTmpReceiveBufferSize, "HTTP/1.* .*WWW-Authenticate.*\r\n") < 0)
   {
-    writeError(ERR_ERROR, "[%s] Failed: Unexpected or no data received: %s", MODULE_NAME, bufReceive);
+    writeError(ERR_ERROR, "%s failed: httpSendRecv was not successful", MODULE_NAME);
+    //FREE(bufSend);
     return FAILURE;
   }
+  // if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
+  // {
+  //   writeError(ERR_ERROR, "%s failed: medusaSend was not successful", MODULE_NAME);
+  //   return FAILURE;
+  // }
 
-  if (bufReceive[0] == '\0')
+  //FREE(bufSend);
+  writeError(ERR_DEBUG_MODULE, "[%s] Received initial challenge: Size %d", MODULE_NAME, nTmpReceiveBufferSize);
+
+  // /* --- Retrieve NTLM challenge from server --- */
+  // if ((medusaReceiveRegex(hSocket, &bufReceive, &nReceiveBufferSize, "HTTP/1.* .*WWW-Authenticate.*\r\n") == FAILURE) || (bufReceive == NULL))
+  // {
+  //   writeError(ERR_ERROR, "[%s] Failed: Unexpected or no data received: %s", MODULE_NAME, bufReceive);
+  //   return FAILURE;
+  // }
+
+  if (tmpBufReceive[0] == '\0')
   {
     writeError(ERR_ERROR, "[%s] Service did not respond to our authentication request.", MODULE_NAME);
     return FAILURE;
+
+  } else {    
+    tmpBufReceive[nTmpReceiveBufferSize] = '\0';
   }
+
+  writeError(ERR_DEBUG_MODULE, "[%s] Debug 1: %x: %s", MODULE_NAME, tmpBufReceive, tmpBufReceive);
 
   /* --- Extract NTLM challenge from Type-2 NTLM response --- */
 
-  szTmpBuf64 = strcasestr((char*)bufReceive, "WWW-Authenticate: NTLM ");
+  szTmpBuf64 = (size_t)strcasestr(tmpBufReceive, "WWW-Authenticate: NTLM ");
   if (szTmpBuf64 == NULL)
   {
     writeError(ERR_ERROR, "[%s] Failed to locate NTLM challenge within server response.", MODULE_NAME);
     return FAILURE;
   }
 
+  writeError(ERR_DEBUG_MODULE, "[%s] Debug 2: %x", MODULE_NAME, szTmpBuf64);
+
   szTmpBuf = index(szTmpBuf64, '\r');
 
-  if (szTmpBuf)
+  writeError(ERR_DEBUG_MODULE, "[%s] Debug 3", MODULE_NAME);
+
+  if (szTmpBuf){
+    writeError(ERR_DEBUG_MODULE, "[%s] Debug 3a", MODULE_NAME);
     szTmpBuf[0] = '\0';
-  else  
+  }
+  else 
     writeError(ERR_ERROR, "[%s] Failed to identify complete NTLM challenge.", MODULE_NAME);
 
   writeError(ERR_DEBUG_MODULE, "[%s] NTLM Challenge (B64 Encoded): %s", MODULE_NAME, szTmpBuf64 + 23);
   base64_decode(szTmpBuf64 + 23, (char *)&sTmpChall);
 
-  FREE(bufReceive);
+
+  writeError(ERR_DEBUG_MODULE, "[%s] Debug 4", MODULE_NAME);
+  FREE(tmpBufReceive);
 
   /* --- Send Type-3 NTLM reply --- */
 
@@ -589,7 +682,7 @@ int sendAuthNTLM(int hSocket, _MODULE_DATA* _psSessionData, char* szLogin, char*
   szTmpBuf64 = malloc(2 * SmbLength(&sTmpResp) + 2);
   memset(szTmpBuf64, 0, 2 * SmbLength(&sTmpResp) + 2);
 
-  base64_encode((char *)&sTmpResp, SmbLength(&sTmpResp), szTmpBuf64);
+  base64_encode((unsigned char *)&sTmpResp, SmbLength(&sTmpResp), szTmpBuf64);
   writeError(ERR_DEBUG_MODULE, "[%s] NTLM Response (B64 Encoded): %s", MODULE_NAME, szTmpBuf64);
 
   nSendBufferSize = 5 + strlen(_psSessionData->szDir) + 17 + strlen(_psSessionData->szHostHeader) +
@@ -599,322 +692,329 @@ int sendAuthNTLM(int hSocket, _MODULE_DATA* _psSessionData, char* szLogin, char*
   bufSend = malloc(nSendBufferSize + 1);
   memset(bufSend, 0, nSendBufferSize + 1);
 
-  sprintf((char*)bufSend, "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAuthorization: NTLM %s\r\nConnection: close\r\n%s\r\n", 
+  sprintf((unsigned char*)bufSend, "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAuthorization: NTLM %s\r\nConnection: close\r\n%s\r\n", 
           _psSessionData->szDir, _psSessionData->szHostHeader, _psSessionData->szUserAgent, szTmpBuf64, _psSessionData->szCustomHeader);
 
-  if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
+  // if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
+  // {
+  //   writeError(ERR_ERROR, "[%s] failed: medusaSend was not successful", MODULE_NAME);
+  //   return FAILURE;
+  // }
+
+  if (httpSendRecv(params, _psSessionData, _psLogin, bufSend, nSendBufferSize, bufReceive, nReceiveBufferSize, "HTTP/1.* [0-9]{3,3} .*\r\n") < 0)
   {
-    writeError(ERR_ERROR, "[%s] failed: medusaSend was not successful", MODULE_NAME);
+    writeError(ERR_ERROR, "%s failed: httpSendRecv was not successful", MODULE_NAME);
+    //FREE(bufSend);
     return FAILURE;
   }
 
   FREE(szTmpBuf64);
-  FREE(bufSend);
+  //FREE(bufSend);
 
   return SUCCESS;
 }
 
-/* http://www.ietf.org/rfc/rfc2617.txt */
-int sendAuthDigest(int hSocket, _MODULE_DATA* _psSessionData, char* szLogin, char* szPassword)
-{
-  unsigned char* bufSend = NULL;
-  unsigned char* bufReceive = NULL;
-  int nReceiveBufferSize = 0;
-  int nSendBufferSize = 0;
-  char *szTmp = NULL;
-  char *szTmp1 = NULL;
-  char *szAuthenticate = NULL;
-  char *szAuthorization = NULL;
+// /* http://www.ietf.org/rfc/rfc2617.txt */
+// int sendAuthDigest(sConnectParams *params, _MODULE_DATA* _psSessionData, char* szLogin, char* szPassword, unsigned char** bufReceive, int *nReceiveBufferSize)
+// {
+//   unsigned char* bufSend = NULL;
+//   unsigned char* bufReceive = NULL;
+//   int nReceiveBufferSize = 0;
+//   int nSendBufferSize = 0;
+//   char *szTmp = NULL;
+//   char *szTmp1 = NULL;
+//   char *szAuthenticate = NULL;
+//   char *szAuthorization = NULL;
 
-  char *szNonce = NULL;
-  char *szCNonce = "31337";
-  char *szRealm = NULL; 
-  char *szAlg = NULL;
-  char  szNonceCount[9] = "00000001";
-  char *szMethod = "GET";
-  char *szQop = NULL;
-  char *szURI = NULL;
-  char *szOpaque = NULL;
-  HASHHEX HA1;
-  HASHHEX HA2 = "";
-  HASHHEX Response;
+//   char *szNonce = NULL;
+//   char *szCNonce = "31337";
+//   char *szRealm = NULL; 
+//   char *szAlg = NULL;
+//   char  szNonceCount[9] = "00000001";
+//   char *szMethod = "GET";
+//   char *szQop = NULL;
+//   char *szURI = NULL;
+//   char *szOpaque = NULL;
+//   HASHHEX HA1;
+//   HASHHEX HA2 = "";
+//   HASHHEX Response;
 
-  /* URI should start with a "/" */
-  if (strncmp(_psSessionData->szDir, "/", 1) == 0) 
-  {
-    szURI = malloc(strlen(_psSessionData->szDir) + 1);
-    memset(szURI, 0, strlen(_psSessionData->szDir) + 1);
-    strncat(szURI, _psSessionData->szDir, strlen(_psSessionData->szDir));
-  }
-  else
-  {
-    szURI = malloc(1 + strlen(_psSessionData->szDir) + 1);
-    memset(szURI, 0, 1 + strlen(_psSessionData->szDir) + 1);
-    strncat(szURI, "/", 1);
-    strncat(szURI, _psSessionData->szDir, strlen(_psSessionData->szDir));
-  }
+//   /* URI should start with a "/" */
+//   if (strncmp(_psSessionData->szDir, "/", 1) == 0) 
+//   {
+//     szURI = malloc(strlen(_psSessionData->szDir) + 1);
+//     memset(szURI, 0, strlen(_psSessionData->szDir) + 1);
+//     strncat(szURI, _psSessionData->szDir, strlen(_psSessionData->szDir));
+//   }
+//   else
+//   {
+//     szURI = malloc(1 + strlen(_psSessionData->szDir) + 1);
+//     memset(szURI, 0, 1 + strlen(_psSessionData->szDir) + 1);
+//     strncat(szURI, "/", 1);
+//     strncat(szURI, _psSessionData->szDir, strlen(_psSessionData->szDir));
+//   }
 
-  /* Send initial request */
-  writeError(ERR_DEBUG_MODULE, "[%s] Sending initial request for digest authentication.", MODULE_NAME);
+//   /* Send initial request */
+//   writeError(ERR_DEBUG_MODULE, "[%s] Sending initial request for digest authentication.", MODULE_NAME);
 
-  nSendBufferSize = 5 + strlen(_psSessionData->szDir) + 17 + strlen(_psSessionData->szHostHeader) +
-                    14 + strlen(_psSessionData->szUserAgent) + 26 + strlen(_psSessionData->szCustomHeader) + 2;
+//   nSendBufferSize = 5 + strlen(_psSessionData->szDir) + 17 + strlen(_psSessionData->szHostHeader) +
+//                     14 + strlen(_psSessionData->szUserAgent) + 26 + strlen(_psSessionData->szCustomHeader) + 2;
 
-  bufSend = malloc(nSendBufferSize + 1);
-  memset(bufSend, 0, nSendBufferSize + 1);
+//   bufSend = malloc(nSendBufferSize + 1);
+//   memset(bufSend, 0, nSendBufferSize + 1);
 
-  sprintf((char*)bufSend, "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nConnection: keep-alive\r\n%s\r\n", 
-          _psSessionData->szDir, _psSessionData->szHostHeader, _psSessionData->szUserAgent, _psSessionData->szCustomHeader);
+//   sprintf((char*)bufSend, "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nConnection: keep-alive\r\n%s\r\n", 
+//           _psSessionData->szDir, _psSessionData->szHostHeader, _psSessionData->szUserAgent, _psSessionData->szCustomHeader);
 
-  if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
-  {
-    writeError(ERR_ERROR, "%s failed: medusaSend was not successful", MODULE_NAME);
-    return FAILURE;
-  }
+//   if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
+//   {
+//     writeError(ERR_ERROR, "%s failed: medusaSend was not successful", MODULE_NAME);
+//     return FAILURE;
+//   }
 
-  FREE(bufSend);
+//   FREE(bufSend);
 
-  /* Retrieve digest challenge from server */
-  bufReceive = medusaReceiveLine(hSocket, &nReceiveBufferSize);
-  if (bufReceive == NULL)
-  {
-    writeError(ERR_ERROR, "[%s] No data received", MODULE_NAME);
-    return FAILURE;
-  }
+//   /* Retrieve digest challenge from server */
+//   bufReceive = medusaReceiveLine(hSocket, &nReceiveBufferSize);
+//   if (bufReceive == NULL)
+//   {
+//     writeError(ERR_ERROR, "[%s] No data received", MODULE_NAME);
+//     return FAILURE;
+//   }
 
-  if (bufReceive[0] == '\0')
-  {
-    writeError(ERR_ERROR, "[%s] Failed to locate digest challenge.", MODULE_NAME);
-    return FAILURE;
-  }
+//   if (bufReceive[0] == '\0')
+//   {
+//     writeError(ERR_ERROR, "[%s] Failed to locate digest challenge.", MODULE_NAME);
+//     return FAILURE;
+//   }
 
-  /* Parse WWW-Authenticate Digest Response */
-  /* Example: WWW-Authenticate: Digest realm="Inter-Tel 5000 (00103605AB8A)", nonce="86591bebf1330b5e57b8de2e4ac216b2", qop="auth" */
-  if ( (szTmp = strcasestr((char*)bufReceive, "WWW-Authenticate: Digest ")) != NULL )
-  {
-    szTmp += 18;
-  }
-  else if ( (szTmp = strcasestr((char*)bufReceive, "WWW-Authenticate:Digest ")) != NULL )
-  {
-    szTmp += 17;
-  }
-  else
-  {
-    writeError(ERR_ERROR, "[%s] Failed to locate digest challenge.", MODULE_NAME);
-    return FAILURE;
-  }
-  szTmp1 = index(szTmp, '\r');
+//   /* Parse WWW-Authenticate Digest Response */
+//   /* Example: WWW-Authenticate: Digest realm="Inter-Tel 5000 (00103605AB8A)", nonce="86591bebf1330b5e57b8de2e4ac216b2", qop="auth" */
+//   if ( (szTmp = strcasestr((char*)bufReceive, "WWW-Authenticate: Digest ")) != NULL )
+//   {
+//     szTmp += 18;
+//   }
+//   else if ( (szTmp = strcasestr((char*)bufReceive, "WWW-Authenticate:Digest ")) != NULL )
+//   {
+//     szTmp += 17;
+//   }
+//   else
+//   {
+//     writeError(ERR_ERROR, "[%s] Failed to locate digest challenge.", MODULE_NAME);
+//     return FAILURE;
+//   }
+//   szTmp1 = index(szTmp, '\r');
 
-  szAuthenticate = malloc(szTmp1 - szTmp + 1);
-  memset(szAuthenticate, 0, szTmp1 - szTmp + 1);
-  strncpy(szAuthenticate, szTmp, szTmp1 - szTmp);
+//   szAuthenticate = malloc(szTmp1 - szTmp + 1);
+//   memset(szAuthenticate, 0, szTmp1 - szTmp + 1);
+//   strncpy(szAuthenticate, szTmp, szTmp1 - szTmp);
 
-  FREE(bufReceive);
+//   FREE(bufReceive);
 
-  writeError(ERR_DEBUG_MODULE, "[%s] Server WWW-Authenticate Digest Response: %s", MODULE_NAME, szAuthenticate);
+//   writeError(ERR_DEBUG_MODULE, "[%s] Server WWW-Authenticate Digest Response: %s", MODULE_NAME, szAuthenticate);
 
-  /* Extract Digest Algorithm, if Specified */
-  /* We currently only support MD5 and MD5-Sess (session) - Do others exist? */
-  if ( strcasestr(szAuthenticate, "algorithm=MD5-sess") || strcasestr(szAuthenticate, "algorithm=\"MD5-sess\"") )
-  {
-    writeError(ERR_DEBUG_MODULE, "[%s] Server requested Digest MD5-sess algorithm.", MODULE_NAME);
-    szAlg = malloc(9);
-    memset(szAlg, 0, 9);
-    sprintf(szAlg, "MD5-sess"); 
-  }
-  else if ( strcasestr(szAuthenticate, "algorithm=MD5") || strcasestr(szAuthenticate, "algorithm=\"MD5\"") )
-  {
-    writeError(ERR_DEBUG_MODULE, "[%s] Server requested Digest MD5 algorithm.", MODULE_NAME);
-    szAlg = malloc(4);
-    memset(szAlg, 0, 4);
-    sprintf(szAlg, "MD5"); 
-  }
-  else if ( strcasestr(szAuthenticate, "algorithm=") )
-  {
-    writeError(ERR_ERROR, "[%s] Server requested unknown Digest algorithm.", MODULE_NAME);
-    return FAILURE;
-  }
-  else
-  {
-    writeError(ERR_DEBUG_MODULE, "[%s] Server did not specify a Digest algorithm, so we're assuming MD5.", MODULE_NAME);
-    szAlg = malloc(4);
-    memset(szAlg, 0, 4);
-    sprintf(szAlg, "MD5"); 
-  }
+//   /* Extract Digest Algorithm, if Specified */
+//   /* We currently only support MD5 and MD5-Sess (session) - Do others exist? */
+//   if ( strcasestr(szAuthenticate, "algorithm=MD5-sess") || strcasestr(szAuthenticate, "algorithm=\"MD5-sess\"") )
+//   {
+//     writeError(ERR_DEBUG_MODULE, "[%s] Server requested Digest MD5-sess algorithm.", MODULE_NAME);
+//     szAlg = malloc(9);
+//     memset(szAlg, 0, 9);
+//     sprintf(szAlg, "MD5-sess"); 
+//   }
+//   else if ( strcasestr(szAuthenticate, "algorithm=MD5") || strcasestr(szAuthenticate, "algorithm=\"MD5\"") )
+//   {
+//     writeError(ERR_DEBUG_MODULE, "[%s] Server requested Digest MD5 algorithm.", MODULE_NAME);
+//     szAlg = malloc(4);
+//     memset(szAlg, 0, 4);
+//     sprintf(szAlg, "MD5"); 
+//   }
+//   else if ( strcasestr(szAuthenticate, "algorithm=") )
+//   {
+//     writeError(ERR_ERROR, "[%s] Server requested unknown Digest algorithm.", MODULE_NAME);
+//     return FAILURE;
+//   }
+//   else
+//   {
+//     writeError(ERR_DEBUG_MODULE, "[%s] Server did not specify a Digest algorithm, so we're assuming MD5.", MODULE_NAME);
+//     szAlg = malloc(4);
+//     memset(szAlg, 0, 4);
+//     sprintf(szAlg, "MD5"); 
+//   }
 
-  /* Extract Digest Realm */
-  szTmp = strcasestr(szAuthenticate, "realm=\"");
-  if (szTmp)
-  {
-    szTmp += 7;
-    szTmp1 = ((char*)index(szTmp, '"'));
+//   /* Extract Digest Realm */
+//   szTmp = strcasestr(szAuthenticate, "realm=\"");
+//   if (szTmp)
+//   {
+//     szTmp += 7;
+//     szTmp1 = ((char*)index(szTmp, '"'));
 
-    szRealm = malloc (szTmp1 - szTmp + 1);
-    memset(szRealm, 0, szTmp1 - szTmp + 1);
-    strncpy(szRealm, szTmp, szTmp1 - szTmp);
-    writeError(ERR_DEBUG_MODULE, "[%s] Extracted Realm Response: %s", MODULE_NAME, szRealm);
-  }
-  else
-  {
-    writeError(ERR_ERROR, "[%s] Failed to extract server Realm response.", MODULE_NAME);
-    szRealm = malloc(1);
-    memset(szRealm, 0, 1);
-  }
+//     szRealm = malloc (szTmp1 - szTmp + 1);
+//     memset(szRealm, 0, szTmp1 - szTmp + 1);
+//     strncpy(szRealm, szTmp, szTmp1 - szTmp);
+//     writeError(ERR_DEBUG_MODULE, "[%s] Extracted Realm Response: %s", MODULE_NAME, szRealm);
+//   }
+//   else
+//   {
+//     writeError(ERR_ERROR, "[%s] Failed to extract server Realm response.", MODULE_NAME);
+//     szRealm = malloc(1);
+//     memset(szRealm, 0, 1);
+//   }
 
-  /* Extract Digest Server Nonce */
-  szTmp = strcasestr(szAuthenticate, "nonce=\"");
-  if (szTmp)
-  {
-    szTmp += 7;
-    szTmp1 = index(szTmp, '"');
+//   /* Extract Digest Server Nonce */
+//   szTmp = strcasestr(szAuthenticate, "nonce=\"");
+//   if (szTmp)
+//   {
+//     szTmp += 7;
+//     szTmp1 = index(szTmp, '"');
 
-    szNonce = malloc (szTmp1 - szTmp + 1);
-    memset(szNonce, 0, szTmp1 - szTmp + 1);
-    strncpy(szNonce, szTmp, szTmp1 - szTmp);
-    writeError(ERR_DEBUG_MODULE, "[%s] Extracted Nonce Response: %s", MODULE_NAME, szNonce);
-  }
-  else
-  {
-    writeError(ERR_ERROR, "[%s] Failed to extract server Nonce response.", MODULE_NAME);
-    szNonce = malloc(1);
-    memset(szNonce, 0, 1);
-  }
+//     szNonce = malloc (szTmp1 - szTmp + 1);
+//     memset(szNonce, 0, szTmp1 - szTmp + 1);
+//     strncpy(szNonce, szTmp, szTmp1 - szTmp);
+//     writeError(ERR_DEBUG_MODULE, "[%s] Extracted Nonce Response: %s", MODULE_NAME, szNonce);
+//   }
+//   else
+//   {
+//     writeError(ERR_ERROR, "[%s] Failed to extract server Nonce response.", MODULE_NAME);
+//     szNonce = malloc(1);
+//     memset(szNonce, 0, 1);
+//   }
 
-  /* Extract Digest Quality of Protection (QoP) - If Specified */
-  szTmp = strcasestr(szAuthenticate, "qop=\"");
-  if (szTmp)
-  {
-    szTmp += 5;
-    szTmp1 = index(szTmp, '"');
+//    Extract Digest Quality of Protection (QoP) - If Specified 
+//   szTmp = strcasestr(szAuthenticate, "qop=\"");
+//   if (szTmp)
+//   {
+//     szTmp += 5;
+//     szTmp1 = index(szTmp, '"');
 
-    szQop = malloc (szTmp1 - szTmp + 1);
-    memset(szQop, 0, szTmp1 - szTmp + 1);
-    strncpy(szQop, szTmp, szTmp1 - szTmp);
-    writeError(ERR_DEBUG_MODULE, "[%s] Extracted Quality of Protection (QoP) Response: %s", MODULE_NAME, szQop);
-  }
-  else
-  {
-    writeError(ERR_DEBUG_MODULE, "[%s] Failed to extract server Quality of Protection (QoP) response.", MODULE_NAME);
-    szQop = NULL;
-  }
+//     szQop = malloc (szTmp1 - szTmp + 1);
+//     memset(szQop, 0, szTmp1 - szTmp + 1);
+//     strncpy(szQop, szTmp, szTmp1 - szTmp);
+//     writeError(ERR_DEBUG_MODULE, "[%s] Extracted Quality of Protection (QoP) Response: %s", MODULE_NAME, szQop);
+//   }
+//   else
+//   {
+//     writeError(ERR_DEBUG_MODULE, "[%s] Failed to extract server Quality of Protection (QoP) response.", MODULE_NAME);
+//     szQop = NULL;
+//   }
 
-  /* Extract Digest Opaque Value - If Specified */
-  szTmp = strcasestr(szAuthenticate, "opaque=\"");
-  if (szTmp)
-  {
-    szTmp += 8;
-    szTmp1 = index(szTmp, '"');
+//   /* Extract Digest Opaque Value - If Specified */
+//   szTmp = strcasestr(szAuthenticate, "opaque=\"");
+//   if (szTmp)
+//   {
+//     szTmp += 8;
+//     szTmp1 = index(szTmp, '"');
 
-    szOpaque = malloc(szTmp1 - szTmp + 1);
-    memset(szOpaque, 0, szTmp1 - szTmp + 1);
-    strncpy(szOpaque, szTmp, szTmp1 - szTmp);
-    writeError(ERR_DEBUG_MODULE, "[%s] Extracted Server Opaque Value: %s", MODULE_NAME, szOpaque);
-  }
-  else
-  {
-    writeError(ERR_DEBUG_MODULE, "[%s] Failed to extract server Opaque value.", MODULE_NAME);
-    szOpaque = NULL;
-  }
+//     szOpaque = malloc(szTmp1 - szTmp + 1);
+//     memset(szOpaque, 0, szTmp1 - szTmp + 1);
+//     strncpy(szOpaque, szTmp, szTmp1 - szTmp);
+//     writeError(ERR_DEBUG_MODULE, "[%s] Extracted Server Opaque Value: %s", MODULE_NAME, szOpaque);
+//   }
+//   else
+//   {
+//     writeError(ERR_DEBUG_MODULE, "[%s] Failed to extract server Opaque value.", MODULE_NAME);
+//     szOpaque = NULL;
+//   }
 
-  FREE(szAuthenticate);
+//   FREE(szAuthenticate);
 
-  /* Send digest response */
-  /* Example: Authorization: Digest username="it5k", realm="Inter-Tel 5000 (00103605AB8A)", nonce="94144a2abae7411d0f6af2b533425497", uri="/", 
-                             response="b9c3980ae4e7fb69796772a3bacc5c18"\r\n */
+//   /* Send digest response */
+//   /* Example: Authorization: Digest username="it5k", realm="Inter-Tel 5000 (00103605AB8A)", nonce="94144a2abae7411d0f6af2b533425497", uri="/", 
+//                              response="b9c3980ae4e7fb69796772a3bacc5c18"\r\n */
 
-  writeError(ERR_DEBUG_MODULE, "[%s] szAlg: %s", MODULE_NAME, szAlg);
-  writeError(ERR_DEBUG_MODULE, "[%s] szLogin: %s", MODULE_NAME, szLogin);
-  writeError(ERR_DEBUG_MODULE, "[%s] szRealm: %s", MODULE_NAME, szRealm);
-  writeError(ERR_DEBUG_MODULE, "[%s] szPassword: %s", MODULE_NAME, szPassword);
-  writeError(ERR_DEBUG_MODULE, "[%s] szNonce: %s", MODULE_NAME, szNonce);
-  writeError(ERR_DEBUG_MODULE, "[%s] szCNonce: %s", MODULE_NAME, szCNonce);
-  writeError(ERR_DEBUG_MODULE, "[%s] szNonceCount: %s", MODULE_NAME, szNonceCount);
-  writeError(ERR_DEBUG_MODULE, "[%s] szQop: %s", MODULE_NAME, szQop);
-  writeError(ERR_DEBUG_MODULE, "[%s] szOpaque: %s", MODULE_NAME, szOpaque);
-  writeError(ERR_DEBUG_MODULE, "[%s] szMethod: %s", MODULE_NAME, szMethod);
-  writeError(ERR_DEBUG_MODULE, "[%s] szURI: %s", MODULE_NAME, szURI);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szAlg: %s", MODULE_NAME, szAlg);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szLogin: %s", MODULE_NAME, szLogin);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szRealm: %s", MODULE_NAME, szRealm);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szPassword: %s", MODULE_NAME, szPassword);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szNonce: %s", MODULE_NAME, szNonce);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szCNonce: %s", MODULE_NAME, szCNonce);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szNonceCount: %s", MODULE_NAME, szNonceCount);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szQop: %s", MODULE_NAME, szQop);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szOpaque: %s", MODULE_NAME, szOpaque);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szMethod: %s", MODULE_NAME, szMethod);
+//   writeError(ERR_DEBUG_MODULE, "[%s] szURI: %s", MODULE_NAME, szURI);
 
-  DigestCalcHA1(szAlg, szLogin, szRealm, szPassword, szNonce, szCNonce, HA1);
-  DigestCalcResponse(HA1, szNonce, szNonceCount, szCNonce, szQop, szMethod, szURI, HA2, Response);
-  writeError(ERR_DEBUG_MODULE, "[%s] Calculated Digest Response: %s", MODULE_NAME, Response);
+//   DigestCalcHA1(szAlg, szLogin, szRealm, szPassword, szNonce, szCNonce, HA1);
+//   DigestCalcResponse(HA1, szNonce, szNonceCount, szCNonce, szQop, szMethod, szURI, HA2, Response);
+//   writeError(ERR_DEBUG_MODULE, "[%s] Calculated Digest Response: %s", MODULE_NAME, Response);
 
-  /*
-    BASE:   Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", algorithm=\"%s\", response=\"%s\"
-    QOP:    , qop=%s, nc=%s, cnonce=\"%s\"
-    OPAQUE: , opaque=\"%s\"
-  */
+//   /*
+//     BASE:   Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", algorithm=\"%s\", response=\"%s\"
+//     QOP:    , qop=%s, nc=%s, cnonce=\"%s\"
+//     OPAQUE: , opaque=\"%s\"
+//   */
 
-  nSendBufferSize = 17 + strlen(szLogin) + 10 + strlen(szRealm) + 10 + strlen(szNonce) + 8 + strlen(szURI) + 14 + strlen(szAlg) + 13 + strlen((char*)Response);
+//   nSendBufferSize = 17 + strlen(szLogin) + 10 + strlen(szRealm) + 10 + strlen(szNonce) + 8 + strlen(szURI) + 14 + strlen(szAlg) + 13 + strlen((char*)Response);
 
-  /* If the server specified a QoP, the client must use a cnonce */
-  if ( strcasestr(szQop, "auth-int") )
-  {
-    writeError(ERR_ERROR, "[%s] Integrity protection (i.e. qop: auth-int) is currently not supported.", MODULE_NAME);
-    return FAILURE;
-  }
-  else if ( strcasestr(szQop, "auth") )
-  {
-    nSendBufferSize += 7 + strlen(szQop) + 5 + strlen(szNonceCount) + 10 + strlen(szCNonce) + 1;
-  }
+//   /* If the server specified a QoP, the client must use a cnonce */
+//   if ( strcasestr(szQop, "auth-int") )
+//   {
+//     writeError(ERR_ERROR, "[%s] Integrity protection (i.e. qop: auth-int) is currently not supported.", MODULE_NAME);
+//     return FAILURE;
+//   }
+//   else if ( strcasestr(szQop, "auth") )
+//   {
+//     nSendBufferSize += 7 + strlen(szQop) + 5 + strlen(szNonceCount) + 10 + strlen(szCNonce) + 1;
+//   }
 
-  /* If the server specified an opaque value, that same value should be included in our response. */
-  if ( szOpaque )
-  {
-    nSendBufferSize += 10 + strlen(szOpaque) + 1; 
-  }
+//   /* If the server specified an opaque value, that same value should be included in our response. */
+//   if ( szOpaque )
+//   {
+//     nSendBufferSize += 10 + strlen(szOpaque) + 1; 
+//   }
 
-  szAuthorization = malloc(nSendBufferSize + 1);
-  memset(szAuthorization, 0, nSendBufferSize + 1);
+//   szAuthorization = malloc(nSendBufferSize + 1);
+//   memset(szAuthorization, 0, nSendBufferSize + 1);
 
-  if ( (szQop != NULL) && (szOpaque != NULL) )
-    sprintf(szAuthorization, "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", algorithm=%s, response=\"%s\", qop=%s, nc=00000001, cnonce=\"%s\", opaque=\"%s\"",
-                             szLogin, szRealm, szNonce, szURI, szAlg, Response, szQop, szCNonce, szOpaque);
-  else if (szQop != NULL)
-    sprintf(szAuthorization, "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", algorithm=%s, response=\"%s\", qop=%s, nc=00000001, cnonce=\"%s\"",
-                             szLogin, szRealm, szNonce, szURI, szAlg, Response, szQop, szCNonce);
-  else if (szOpaque != NULL)
-    sprintf(szAuthorization, "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", algorithm=%s, response=\"%s\", opaque=\"%s\"",
-                             szLogin, szRealm, szNonce, szURI, szAlg, Response, szOpaque);
-  else
-    sprintf(szAuthorization, "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", algorithm=%s, response=\"%s\"",
-                             szLogin, szRealm, szNonce, szURI, szAlg, Response);
+//   if ( (szQop != NULL) && (szOpaque != NULL) )
+//     sprintf(szAuthorization, "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", algorithm=%s, response=\"%s\", qop=%s, nc=00000001, cnonce=\"%s\", opaque=\"%s\"",
+//                              szLogin, szRealm, szNonce, szURI, szAlg, Response, szQop, szCNonce, szOpaque);
+//   else if (szQop != NULL)
+//     sprintf(szAuthorization, "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", algorithm=%s, response=\"%s\", qop=%s, nc=00000001, cnonce=\"%s\"",
+//                              szLogin, szRealm, szNonce, szURI, szAlg, Response, szQop, szCNonce);
+//   else if (szOpaque != NULL)
+//     sprintf(szAuthorization, "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", algorithm=%s, response=\"%s\", opaque=\"%s\"",
+//                              szLogin, szRealm, szNonce, szURI, szAlg, Response, szOpaque);
+//   else
+//     sprintf(szAuthorization, "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", algorithm=%s, response=\"%s\"",
+//                              szLogin, szRealm, szNonce, szURI, szAlg, Response);
 
-  FREE(szAlg);
-  FREE(szRealm);
-  FREE(szNonce);
-  FREE(szQop);
-  FREE(szOpaque);
-  FREE(szURI);
+//   FREE(szAlg);
+//   FREE(szRealm);
+//   FREE(szNonce);
+//   FREE(szQop);
+//   FREE(szOpaque);
+//   FREE(szURI);
 
-  nSendBufferSize = 5 + strlen(_psSessionData->szDir) + 17 + strlen(_psSessionData->szHostHeader) +
-                    14 + strlen(_psSessionData->szUserAgent) + 17 + strlen(szAuthorization) + 26 +
-                    strlen(_psSessionData->szCustomHeader) + 2;
+//   nSendBufferSize = 5 + strlen(_psSessionData->szDir) + 17 + strlen(_psSessionData->szHostHeader) +
+//                     14 + strlen(_psSessionData->szUserAgent) + 17 + strlen(szAuthorization) + 26 +
+//                     strlen(_psSessionData->szCustomHeader) + 2;
 
-  bufSend = malloc(nSendBufferSize + 1);
-  memset(bufSend, 0, nSendBufferSize + 1);
+//   bufSend = malloc(nSendBufferSize + 1);
+//   memset(bufSend, 0, nSendBufferSize + 1);
 
-  sprintf((char*)bufSend, "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAuthorization: %s\r\nConnection: keep-alive\r\n%s\r\n", 
-          _psSessionData->szDir, _psSessionData->szHostHeader, _psSessionData->szUserAgent, szAuthorization, _psSessionData->szCustomHeader);
+//   sprintf((char*)bufSend, "GET /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAuthorization: %s\r\nConnection: keep-alive\r\n%s\r\n", 
+//           _psSessionData->szDir, _psSessionData->szHostHeader, _psSessionData->szUserAgent, szAuthorization, _psSessionData->szCustomHeader);
 
-  if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
-  {
-    writeError(ERR_ERROR, "[%s] failed: medusaSend was not successful", MODULE_NAME);
-    return FAILURE;
-  }
+//   if (medusaSend(hSocket, bufSend, nSendBufferSize, 0) < 0)
+//   {
+//     writeError(ERR_ERROR, "[%s] failed: medusaSend was not successful", MODULE_NAME);
+//     return FAILURE;
+//   }
 
-  FREE(szAuthorization);
-  FREE(bufSend);
+//   FREE(szAuthorization);
+//   FREE(bufSend);
 
-  return SUCCESS;
-}
+//   return SUCCESS;
+// }
 
-int tryLogin(int hSocket, _MODULE_DATA* _psSessionData, sLogin** login, char* szLogin, char* szPassword)
+int tryLogin(sConnectParams *params, _MODULE_DATA* _psSessionData, sLogin** login, unsigned char* szLogin, unsigned char* szPassword)
 {
   unsigned char* pReceiveBuffer = NULL;
   int nReceiveBufferSize = 0;
   int nRet = SUCCESS;
-  char* pTemp = NULL;
-  char szStatusCode[4];
+  unsigned char* pTemp = NULL;
+  unsigned char szStatusCode[4];
 
   switch(_psSessionData->nAuthType)
   {
@@ -926,17 +1026,18 @@ int tryLogin(int hSocket, _MODULE_DATA* _psSessionData, sLogin** login, char* sz
       break;
     case AUTH_BASIC:
       writeError(ERR_DEBUG_MODULE, "[%s] Sending Basic Authentication.", MODULE_NAME);
-      nRet = sendAuthBasic(hSocket, _psSessionData, szLogin, szPassword);
+      nRet = sendAuthBasic(params, _psSessionData, *login, szLogin, szPassword, &pReceiveBuffer, &nReceiveBufferSize);
       break;
     case AUTH_NTLM:
       writeError(ERR_DEBUG_MODULE, "[%s] Sending Windows Integrated (NTLM) Authentication.", MODULE_NAME);
-      nRet = sendAuthNTLM(hSocket, _psSessionData, szLogin, szPassword);
+      nRet = sendAuthNTLM(params, _psSessionData, *login, szLogin, szPassword, &pReceiveBuffer, &nReceiveBufferSize);
       break;
-    case AUTH_DIGEST:
-      writeError(ERR_DEBUG_MODULE, "[%s] Sending Digest Authentication.", MODULE_NAME);
-      nRet = sendAuthDigest(hSocket, _psSessionData, szLogin, szPassword);
-      break;
+    //case AUTH_DIGEST:
+    //  writeError(ERR_DEBUG_MODULE, "[%s] Sending Digest Authentication.", MODULE_NAME);
+    //  nRet = sendAuthDigest(params, _psSessionData, szLogin, szPassword, &pReceiveBuffer, &nReceiveBufferSize);
+    //  break;
     default:
+      nRet = FAILURE;
       break;
   }
 
@@ -948,17 +1049,17 @@ int tryLogin(int hSocket, _MODULE_DATA* _psSessionData, sLogin** login, char* sz
     return MSTATE_EXITING;  
   }
 
-  writeError(ERR_DEBUG_MODULE, "[%s] Retrieving server response.", MODULE_NAME);
-  nReceiveBufferSize = 0;
-  if ((medusaReceiveRegex(hSocket, &pReceiveBuffer, &nReceiveBufferSize, "HTTP/1.* [0-9]{3,3} .*\r\n") == FAILURE) || (pReceiveBuffer == NULL))
-  {
-    writeError(ERR_ERROR, "[%s] Failed: Unexpected or no data received: %s", MODULE_NAME, pReceiveBuffer);
-    return FAILURE;
-  }
+  // writeError(ERR_DEBUG_MODULE, "[%s] Retrieving server response.", MODULE_NAME);
+  // nReceiveBufferSize = 0;
+  // if ((medusaReceiveRegex(hSocket, &pReceiveBuffer, &nReceiveBufferSize, "HTTP/1.* [0-9]{3,3} .*\r\n") == FAILURE) || (pReceiveBuffer == NULL))
+  // {
+  //   writeError(ERR_ERROR, "[%s] Failed: Unexpected or no data received: %s", MODULE_NAME, pReceiveBuffer);
+  //   return FAILURE;
+  // }
 
-  pTemp = strstr((char*)pReceiveBuffer, "HTTP/1.");
+  pTemp = strstr(( unsigned char*)pReceiveBuffer, "HTTP/1.");
   pTemp = index(pTemp, ' ') + 1;
-  memset((char*)index(pTemp, 0x0d), 0, 1);
+  memset((unsigned char*)index(pTemp, 0x0d), 0, 1);
  
   memset(szStatusCode, 0, 4);
   strncpy(szStatusCode, pTemp, 3);
@@ -1013,7 +1114,7 @@ int tryLogin(int hSocket, _MODULE_DATA* _psSessionData, sLogin** login, char* sz
 
 #else
 
-void summaryUsage(char **ppszSummary)
+void summaryUsage(unsigned char **ppszSummary)
 {
   // Memory for ppszSummary will be allocated here - caller is responsible for freeing it
   int  iLength = 0;
@@ -1021,7 +1122,7 @@ void summaryUsage(char **ppszSummary)
   if (*ppszSummary == NULL)
   {
     iLength = strlen(MODULE_SUMMARY_USAGE) + strlen(MODULE_VERSION) + strlen(MODULE_SUMMARY_FORMAT) + strlen(OPENSSL_WARNING) + 1;
-    *ppszSummary = (char*)malloc(iLength);
+    *ppszSummary = (unsigned char*)malloc(iLength);
     memset(*ppszSummary, 0, iLength);
     snprintf(*ppszSummary, iLength, MODULE_SUMMARY_FORMAT_WARN, MODULE_SUMMARY_USAGE, MODULE_VERSION, OPENSSL_WARNING);
   }
